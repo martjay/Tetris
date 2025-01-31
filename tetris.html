@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>俄罗斯方块</title>
+  <style>
+    body {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background-color: #333;
+      color: #fff;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      border: 2px solid #fff;
+      background-color: #000;
+    }
+    button {
+      margin: 10px;
+      padding: 10px 20px;
+      font-size: 16px;
+      cursor: pointer;
+    }
+    .controls {
+      margin-top: 20px;
+    }
+    .score {
+      margin-top: 20px;
+      font-size: 24px;
+    }
+    .tetromino {
+      transition: transform 0.1s;
+    }
+    @keyframes explode {
+        0% { 
+            transform: scale(1);
+            opacity: 1;
+        }
+        50% { 
+            transform: scale(1.5);
+            opacity: 0.5;
+        }
+        100% { 
+            transform: scale(0);
+            opacity: 0;
+        }
+    }
+
+    .particle {
+        position: absolute;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        pointer-events: none;
+        animation: particleFloat 1.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards;
+        box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
+    }
+
+    @keyframes particleFloat {
+        0% {
+            transform: translate(0, 0) scale(1.5);
+            opacity: 1;
+        }
+        50% {
+            opacity: 0.8;
+        }
+        100% {
+            transform: translate(var(--dx), var(--dy)) scale(0);
+            opacity: 0;
+        }
+    }
+  </style>
+</head>
+<body>
+  <h1>俄罗斯方块</h1>
+  <canvas id="tetris" width="300" height="600"></canvas>
+  <div class="score">得分: <span id="score">0</span></div>
+  <div class="controls">
+    <button id="startButton">开始</button>
+    <button id="pauseButton">暂停</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('tetris');
+    const context = canvas.getContext('2d');
+
+    const ROWS = 20;
+    const COLS = 10;
+    const BLOCK_SIZE = 30;
+
+    // Game state
+    let board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+    let currentTetromino = null;
+    let isPaused = false;
+    let score = 0;
+    let speed = 500; // Initial speed in milliseconds
+    let lastTime = 0;
+
+    // Tetrominoes
+    const TETROMINOES = {
+      I: [[0,0,0,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0],[0,0,1,0,0]],
+      O: [[0,0,0,0],[0,1,1,0],[0,1,1,0],[0,0,0,0]],
+      T: [[0,0,0],[0,1,0],[1,1,1]],
+      S: [[0,0,0],[0,1,1],[1,1,0]],
+      Z: [[0,0,0],[1,1,0],[0,1,1]],
+      J: [[0,0,0],[1,0,0],[1,1,1]],
+      L: [[0,0,0],[0,0,1],[1,1,1]],
+    };
+
+    // Colors for tetrominoes
+    const COLORS = ['#FF5733', '#33FF57', '#3357FF', '#F3FF33', '#FF33F3', '#33FFF6', '#F633FF'];
+
+    // Pre-render blocks for faster drawing
+    let blockImage = document.createElement('canvas');
+    let blockCtx = blockImage.getContext('2d');
+    blockImage.width = BLOCK_SIZE;
+    blockImage.height = BLOCK_SIZE;
+
+    function adjustColor(color, amount) {
+      const hex = color.replace('#', '');
+      const r = Math.max(0, Math.min(255, parseInt(hex.substr(0, 2), 16) + amount));
+      const g = Math.max(0, Math.min(255, parseInt(hex.substr(2, 2), 16) + amount));
+      const b = Math.max(0, Math.min(255, parseInt(hex.substr(4, 2), 16) + amount));
+      return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+    }
+
+    function createBlockImage(color, ghost = false) {
+      blockCtx.clearRect(0, 0, BLOCK_SIZE, BLOCK_SIZE);
+      
+      if (ghost) {
+        blockCtx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+        blockCtx.setLineDash([5, 5]);
+        blockCtx.strokeRect(2, 2, BLOCK_SIZE - 4, BLOCK_SIZE - 4);
+      } else {
+        // 创建渐变
+        const gradient = blockCtx.createLinearGradient(0, 0, BLOCK_SIZE, BLOCK_SIZE);
+        gradient.addColorStop(0, color);
+        gradient.addColorStop(1, adjustColor(color, -30));
+
+        // 填充主体
+        blockCtx.fillStyle = gradient;
+        blockCtx.fillRect(0, 0, BLOCK_SIZE - 1, BLOCK_SIZE - 1);
+        
+        // 添加高光
+        blockCtx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        blockCtx.beginPath();
+        blockCtx.moveTo(0, 0);
+        blockCtx.lineTo(BLOCK_SIZE - 1, 0);
+        blockCtx.lineTo(0, BLOCK_SIZE - 1);
+        blockCtx.fill();
+
+        // 添加边框
+        blockCtx.strokeStyle = '#000';
+        blockCtx.strokeRect(0, 0, BLOCK_SIZE - 1, BLOCK_SIZE - 1);
+      }
+      return blockImage;
+    }
+
+    // Double buffering
+    let offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = canvas.width;
+    offscreenCanvas.height = canvas.height;
+    let offscreenCtx = offscreenCanvas.getContext('2d');
+
+    function drawBlock(x, y, color, ghost = false) {
+      offscreenCtx.drawImage(createBlockImage(color, ghost), x * BLOCK_SIZE, y * BLOCK_SIZE);
+    }
+
+    function clearBlock(x, y) {
+      offscreenCtx.clearRect(x * BLOCK_SIZE, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    }
+
+    function render() {
+      offscreenCtx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw board
+      board.forEach((row, y) => {
+        row.forEach((cell, x) => {
+          if (cell) {
+            drawBlock(x, y, cell.color);
+          }
+        });
+      });
+
+      // Draw current tetromino
+      if (currentTetromino) {
+        // Draw ghost tetromino
+        let ghostY = getGhostPosition();
+        currentTetromino.shape.forEach((row, dy) => {
+          row.forEach((value, dx) => {
+            if (value) {
+              drawBlock(currentTetromino.x + dx, ghostY + dy, currentTetromino.color, true);
+            }
+          });
+        });
+
+        // Draw actual tetromino
+        currentTetromino.shape.forEach((row, dy) => {
+          row.forEach((value, dx) => {
+            if (value) {
+              drawBlock(currentTetromino.x + dx, currentTetromino.y + dy, currentTetromino.color);
+            }
+          });
+        });
+      }
+      
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(offscreenCanvas, 0, 0);
+    }
+
+    function getGhostPosition() {
+      let ghostY = currentTetromino.y;
+      while (!checkCollisionAt(ghostY + 1)) {
+        ghostY++;
+      }
+      return ghostY;
+    }
+
+    function checkCollisionAt(y) {
+      return currentTetromino.shape.some((row, dy) =>
+        row.some((value, dx) => {
+          let x = currentTetromino.x + dx;
+          let testY = y + dy;
+          return value && (testY >= ROWS || x < 0 || x >= COLS || (board[testY] && board[testY][x] !== 0));
+        })
+      );
+    }
+
+    function moveDown() {
+      if (currentTetromino) {
+        currentTetromino.shape.forEach((row, dy) => {
+          row.forEach((value, dx) => {
+            if (value) {
+              clearBlock(currentTetromino.x + dx, currentTetromino.y + dy);
+            }
+          });
+        });
+      }
+      
+      currentTetromino.y++;
+      if (checkCollision()) {
+        currentTetromino.y--;
+        placeTetromino();
+        spawnNewTetromino();
+      }
+      render();
+    }
+
+    function checkCollision() {
+      return checkCollisionAt(currentTetromino.y);
+    }
+
+    function placeTetromino() {
+      currentTetromino.shape.forEach((row, dy) => {
+        row.forEach((value, dx) => {
+          if (value) {
+            board[currentTetromino.y + dy][currentTetromino.x + dx] = { color: currentTetromino.color };
+          }
+        });
+      });
+      clearLines();
+      render();
+    }
+
+    function createExplosion(x, y, color) {
+        const particles = 30; // 增加粒子数量
+        for (let i = 0; i < particles; i++) {
+            const particle = document.createElement('div');
+            particle.className = 'particle';
+            particle.style.backgroundColor = color;
+            particle.style.left = `${x}px`;
+            particle.style.top = `${y}px`;
+            
+            // 随机方向
+            const angle = (Math.random() * Math.PI * 2);
+            const distance = 100 + Math.random() * 100; // 增加扩散距离
+            const dx = Math.cos(angle) * distance;
+            const dy = Math.sin(angle) * distance;
+            
+            // 添加随机延迟使爆炸效果更自然
+            const delay = Math.random() * 0.2;
+            particle.style.animationDelay = `${delay}s`;
+            
+            particle.style.setProperty('--dx', `${dx}px`);
+            particle.style.setProperty('--dy', `${dy}px`);
+            
+            document.body.appendChild(particle);
+            setTimeout(() => particle.remove(), 1500); // 延长清除时间
+        }
+    }
+
+    function clearLines() {
+        let linesCleared = 0;
+        for (let y = ROWS - 1; y >= 0; y--) {
+            if (board[y].every(cell => cell !== 0)) {
+                // 添加消除动画
+                board[y].forEach((cell, x) => {
+                    if (cell) {
+                        const block = document.createElement('div');
+                        block.className = 'tetromino';
+                        const blockX = x * BLOCK_SIZE + canvas.offsetLeft;
+                        const blockY = y * BLOCK_SIZE + canvas.offsetTop;
+                        block.style.position = 'absolute';
+                        block.style.left = `${blockX}px`;
+                        block.style.top = `${blockY}px`;
+                        block.style.width = `${BLOCK_SIZE}px`;
+                        block.style.height = `${BLOCK_SIZE}px`;
+                        block.style.backgroundColor = cell.color;
+                        block.style.animation = 'explode 0.5s ease-out forwards';
+                        document.body.appendChild(block);
+                        
+                        // 创建爆炸效果
+                        createExplosion(
+                            blockX + BLOCK_SIZE / 2,
+                            blockY + BLOCK_SIZE / 2,
+                            cell.color
+                        );
+                        
+                        setTimeout(() => block.remove(), 500);
+                    }
+                });
+
+                board.splice(y, 1);
+                board.unshift(Array(COLS).fill(0));
+                linesCleared++;
+                y++;
+            }
+        }
+        updateScore(linesCleared);
+    }
+
+    function updateScore(linesCleared) {
+      score += linesCleared * 100;
+      document.getElementById('score').textContent = score;
+      adjustSpeed();
+    }
+
+    function adjustSpeed() {
+      speed = Math.max(100, 500 - Math.floor(score / 1000) * 100);
+    }
+
+    function spawnNewTetromino() {
+      const keys = Object.keys(TETROMINOES);
+      const randomKey = keys[Math.floor(Math.random() * keys.length)];
+      
+      currentTetromino = {
+        shape: TETROMINOES[randomKey],
+        x: Math.floor(COLS / 2) - Math.floor(TETROMINOES[randomKey][0].length / 2),
+        y: 0,
+        color: COLORS[Math.floor(Math.random() * COLORS.length)],
+      };
+      
+      if (checkCollision()) {
+        alert('Game Over!');
+        resetGame();
+      } else {
+        render();
+      }
+    }
+
+    function resetGame() {
+      board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+      currentTetromino = null;
+      isPaused = false;
+      score = 0;
+      speed = 500;
+      document.getElementById('score').textContent = score;
+      document.getElementById('startButton').disabled = false;
+      document.getElementById('pauseButton').textContent = '暂停';
+      render();
+    }
+
+    function rotateTetromino() {
+      if (currentTetromino) {
+        currentTetromino.shape.forEach((row, dy) => {
+          row.forEach((value, dx) => {
+            if (value) {
+              clearBlock(currentTetromino.x + dx, currentTetromino.y + dy);
+            }
+          });
+        });
+      }
+      
+      const rotated = currentTetromino.shape[0].map((_, i) =>
+        currentTetromino.shape.map(row => row[i]).reverse()
+      );
+      const prevShape = currentTetromino.shape;
+      
+      currentTetromino.shape = rotated;
+      if (checkCollision()) {
+        currentTetromino.shape = prevShape;
+      }
+      render();
+    }
+
+    document.addEventListener('keydown', event => {
+      if (isPaused) return;
+      switch(event.key) {
+        case 'ArrowLeft': 
+          if (canMove(-1, 0)) { 
+            currentTetromino.shape.forEach((row, dy) => {
+              row.forEach((value, dx) => {
+                if (value) {
+                  clearBlock(currentTetromino.x + dx, currentTetromino.y + dy);
+                }
+              });
+            });
+            currentTetromino.x--; 
+            render(); 
+          }
+          break;
+        case 'ArrowRight': 
+          if (canMove(1, 0)) { 
+            currentTetromino.shape.forEach((row, dy) => {
+              row.forEach((value, dx) => {
+                if (value) {
+                  clearBlock(currentTetromino.x + dx, currentTetromino.y + dy);
+                }
+              });
+            });
+            currentTetromino.x++; 
+            render(); 
+          }
+          break;
+        case 'ArrowDown': 
+          moveDown(); 
+          break;
+        case 'ArrowUp': 
+          rotateTetromino(); 
+          break;
+      }
+    });
+
+    function canMove(dx, dy) {
+      return currentTetromino.shape.every((row, y) =>
+        row.every((value, x) => 
+          value === 0 || !((x + currentTetromino.x + dx < 0 || 
+                            x + currentTetromino.x + dx >= COLS || 
+                            y + currentTetromino.y + dy >= ROWS || 
+                            (board[y + currentTetromino.y + dy] && board[y + currentTetromino.y + dy][x + currentTetromino.x + dx] !== 0)))
+        )
+      );
+    }
+
+    document.getElementById('startButton').addEventListener('click', () => {
+      resetGame();
+      spawnNewTetromino();
+      document.getElementById('startButton').disabled = true;
+      gameLoop();
+    });
+
+    document.getElementById('pauseButton').addEventListener('click', () => {
+      isPaused = !isPaused;
+      document.getElementById('pauseButton').textContent = isPaused ? '继续' : '暂停';
+    });
+
+    function gameLoop(timestamp) {
+      if (!lastTime) lastTime = timestamp;
+      const deltaTime = timestamp - lastTime;
+
+      if (!isPaused && deltaTime >= speed) {
+        moveDown();
+        lastTime = timestamp;
+      }
+      
+      requestAnimationFrame(gameLoop);
+    }
+  </script>
+</body>
+</html>
